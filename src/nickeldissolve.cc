@@ -113,12 +113,14 @@ static inline void     wr32(uint8_t *b, unsigned off, uint32_t v) { memcpy(b + o
 static int  (*real_ioctl)(int fd, unsigned long request, void *argp) = nullptr;
 static void (*real_goToNextPage)(void *self) = nullptr;
 static void (*real_goToPrevPage)(void *self) = nullptr;
+static bool (*real_ltrProgress)(void *self) = nullptr;   // ReadingView::leftToRightPageProgressDirection
 
 static bool nds_safety_disabled = false;
 // Verbose tracing switch (declared in util.h, used by NDS_DBG + the hot-path traces). Published
 // once by nds_init after the config is parsed; false on a healthy "sweep"/"off" device.
 extern "C" { bool nds_verbose_enabled = false; }
 static int  nds_turn_dir = 0;                 // 0 = forward (next), 1 = backward (prev)
+static volatile int nds_turn_book_ltr = 1;    // open book's page progression at the turn: 1 = ltr, 0 = rtl
 static volatile int  nds_turn_pending = 0;    // a page turn just fired; sweep its next full update
 static volatile long nds_turn_ts = 0;         // time() when the turn fired (staleness guard)
 // Book-open / chapter-jump detection: Kobo draws these as a full-screen flash immediately
@@ -235,6 +237,16 @@ static int  nds_cold_skip_ms() { const char *v = nds_global_config_get("nds_cold
 // set, this supersedes nds_cold_skip_ms. 0 = disabled.
 static int  nds_prewarm_ms()   { const char *v = nds_global_config_get("nds_prewarm_ms"); int n = (v && *v) ? atoi(v) : 0; if (n < 0) n = 0; return n; }
 static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
+// nds_direction is the forward sweep for an ordinary (ltr page progression) book. With
+// nds_auto_direction on (default), a book Nickel pages right-to-left flips it, and a backward turn
+// flips it again, so the new page always comes in from the side the reader is turning towards.
+static bool nds_auto_direction() { return nds_global_config_bool("nds_auto_direction", true); }
+static bool nds_sweep_rtl() {
+    bool rtl = nds_rtl();
+    if (nds_auto_direction() && !nds_turn_book_ltr) rtl = !rtl;
+    if (nds_turn_dir == 1) rtl = !rtl;
+    return rtl;
+}
 static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_debug_wait"); return w && !strcasecmp(w, "complete"); }
 // Inter-strip delay. If nds_delay_us is set in config it always wins; if it's absent, fall back to
 // the caller's per-platform default (hwtcon 0, paced by the submission-wait; mxcfb ~30 ms, no
@@ -327,8 +339,7 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     if (wf_override == 0) wf_override = nds_default_strip_wf(plat, turn_wf);   // else per-device default (colour day: 8, dark: GLKW16)
     const int delay = nds_delay_us((int)plat->def_delay_us);   // config wins; else per-platform default
     const bool want_complete = nds_wait_complete();
-    bool rtl = nds_rtl();
-    if (nds_turn_dir == 1) rtl = !rtl;               // backward turn sweeps the opposite way
+    const bool rtl = nds_sweep_rtl();
 
     uint8_t v[128];
     if (plat->size > sizeof(v) || sw == 0) { real_ioctl(fd, plat->send, (void *)orig); return; }
@@ -503,7 +514,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                                 plat->name, w, h, (unsigned long)(nds_turn_idle_any_us / 1000ull), cold_ms);
                     }
                 } else {
-                    bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
+                    const bool rtl = nds_sweep_rtl();
                     static int swept = 0;
                     if (nds_verbose_enabled && swept < 40) { swept++;
                         NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
@@ -567,18 +578,25 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 // and records its true direction, with no tap-position or tap-zone guessing. Chapter jumps and book
 // opens use other paths, so they never arm here. These run on the UI thread, so they double as a
 // safe retry point for installing the gesture filter in case Qt didn't exist yet at plugin init.
+// The open book's page progression is read here too, from the same ReadingView, so a switch to an
+// rtl book (vertical Japanese/Chinese, manga) takes effect on its very first turn.
+static int nds_book_ltr(void *self) {
+    return (real_ltrProgress && self) ? (real_ltrProgress(self) ? 1 : 0) : 1;
+}
 extern "C" __attribute__((visibility("default")))
 void _nds_goToNextPage(void *self) {
     nds_gesture_filter_install();
+    nds_turn_book_ltr = nds_book_ltr(self);
     nds_turn_dir = 0; nds_turn_pending = 1; nds_turn_ts = nds_now();
-    static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: forward"); }
+    static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: forward book=%s", nds_turn_book_ltr ? "ltr" : "rtl"); }
     if (real_goToNextPage) real_goToNextPage(self);
 }
 extern "C" __attribute__((visibility("default")))
 void _nds_goToPrevPage(void *self) {
     nds_gesture_filter_install();
+    nds_turn_book_ltr = nds_book_ltr(self);
     nds_turn_dir = 1; nds_turn_pending = 1; nds_turn_ts = nds_now();
-    static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: backward"); }
+    static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: backward book=%s", nds_turn_book_ltr ? "ltr" : "rtl"); }
     if (real_goToPrevPage) real_goToPrevPage(self);
 }
 
@@ -604,10 +622,10 @@ static int nds_init() {
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.
     bool gf = nds_gesture_filter_install();
     const char *scfg = nds_global_config_get("nds_strips");
-    NDS_LOG("startup: mode=%s strips=%s dir=%s delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d verbose=%d "
+    NDS_LOG("startup: mode=%s strips=%s dir=%s auto_dir=%d ltr_sym=%d delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d verbose=%d "
             "| debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d force_bw=%d sweep_any_wf=%d",
             nds_off() ? "off" : (nds_sweep_mode() ? "SWEEP" : "observe"), (scfg && *scfg) ? scfg : "auto(by panel)",
-            nds_rtl() ? "R->L" : "L->R", (dcfg && *dcfg) ? dcfg : "auto(per-platform)",
+            nds_rtl() ? "R->L" : "L->R", nds_auto_direction(), real_ltrProgress ? 1 : 0, (dcfg && *dcfg) ? dcfg : "auto(per-platform)",
             nds_animate_swipe(), nds_animate_tap(), nds_animate_button(), gf, nds_verbose_enabled,
             nds_strip_wf(), nds_wait_complete() ? "complete" : "submission",
             nds_cfa_skip(), nds_force_bw(), nds_global_config_bool("nds_debug_sweep_any_waveform", false));
@@ -671,6 +689,11 @@ static struct nh_dlsym NickelDissolveDlsym[] = {
     //libnickel 4.38.21908 * _ZNK6Device15hasColorDisplayEv (introduced 4.38.21908; absent on older fw)
     { .name = "_ZNK6Device15hasColorDisplayEv", .out = nh_symoutptr(real_hasColorDisplay),
       .desc = "Device::hasColorDisplay (colour vs mono panel; firmware 4.38.21908+)", .optional = true },
+    // The open book's page progression, as Nickel itself uses it to swap the tap zones in
+    // ReadingView::processTap. Optional: if missing, every book sweeps per nds_direction alone.
+    //libnickel 4.6.9960 * _ZNK11ReadingView32leftToRightPageProgressDirectionEv
+    { .name = "_ZNK11ReadingView32leftToRightPageProgressDirectionEv", .out = nh_symoutptr(real_ltrProgress),
+      .desc = "ReadingView::leftToRightPageProgressDirection (per-book sweep direction)", .optional = true },
     {0},
 };
 

@@ -2,6 +2,12 @@
 
 All notable, user-visible changes to NickelDissolve. Release notes are generated from this file: each `## vX.Y` heading must exactly match a git tag.
 
+## v0.8
+
+### Improved
+
+- **Right-to-left books now sweep the right way automatically.** Books that page right-to-left (vertical Japanese or Traditional Chinese, manga) used to wipe the same way as ordinary books, so the new page came in from the wrong side. The mod now asks the reader which way the open book pages and flips the sweep to match, book by book, with no config change or reboot. Ordinary books are unchanged. Set `nds_auto_direction:0` to go back to one fixed direction for every book.
+
 ## v0.7
 
 ### Fixed

@@ -35,7 +35,8 @@ override. Delete the file to go back to the defaults. Changes take effect on reb
 | `nds_mode` | `sweep` | `sweep` = animate page turns; `observe` = don't animate, just log; `off` = do nothing at all |
 | `nds_strips` | auto | number of vertical bands (2–32); more = smoother but slower. Unset picks a per-device default (12 on 7-inch panels, 10 on 6-inch) |
 | `nds_delay_us` | per-device | extra pause between bands, in microseconds (0–50000); the speed dial, raise to slow the wipe down |
-| `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); backward turns flip automatically |
+| `nds_direction` | `rtl` | forward-turn sweep direction for ordinary books (`rtl` or `ltr`); backward turns flip automatically |
+| `nds_auto_direction` | `1` | `1` = books that page right-to-left (vertical Japanese/Chinese, manga) flip the sweep automatically; `0` = every book uses `nds_direction` |
 | `nds_animate_on_swipe` | `1` | `0` = swipe turns change instantly instead of animating |
 | `nds_animate_on_tap` | `1` | `0` = tap turns change instantly instead of animating |
 | `nds_animate_on_button` | `1` | `0` = page-turn button presses change instantly instead of animating |
